@@ -6,7 +6,7 @@ import sys
 import argparse
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 
 DEFAULT_DB_PATH = Path("./home-assistant_v2.db")
@@ -131,75 +131,6 @@ def _stats_span(conn: sqlite3.Connection, table: str, where_sql: str, params: tu
     if row is None:
         return 0, None, None
     return int(row[0] or 0), (None if row[1] is None else float(row[1])), (None if row[2] is None else float(row[2]))
-
-
-def _print_overlapping_old_rows(
-    conn: sqlite3.Connection,
-    table: str,
-    selector: StatsSelector,
-    *,
-    overlap_start_ts: float,
-    overlap_end_ts: float,
-) -> None:
-    cols = _columns(conn, table)
-    start_epoch_expr = _start_ts_expr(cols)
-    conn.row_factory = sqlite3.Row
-    print(f"Overlap detected in {table}; printing overlapping OLD rows (all columns):")
-    print(f"- range: {_fmt_ts(overlap_start_ts)} .. {_fmt_ts(overlap_end_ts)}")
-
-    rows = conn.execute(
-        f"SELECT * FROM {table} WHERE {selector.where_old} AND {start_epoch_expr} >= ? AND {start_epoch_expr} <= ? "
-        f"ORDER BY {start_epoch_expr} ASC",
-        (*selector.params_old, overlap_start_ts, overlap_end_ts),
-    ).fetchall()
-
-    print(f"- old overlapping rows: {len(rows)}")
-    for r in rows:
-        d = dict(r)
-        # Emit a stable, readable representation.
-        print(json.dumps(d, ensure_ascii=False, sort_keys=True, default=str))
-
-
-def _print_omit_rows_table(
-    conn: sqlite3.Connection,
-    table: str,
-    selector: StatsSelector,
-    *,
-    overlap_start_ts: float,
-    overlap_end_ts: float,
-) -> None:
-    cols = _columns(conn, table)
-    start_epoch_expr = _start_ts_expr(cols)
-
-    wanted = ["start_ts", "state", "min", "mean", "max", "sum", "last_reset_ts"]
-    # Map wanted -> SQL expression
-    select_exprs: list[str] = []
-    for c in wanted:
-        if c == "start_ts":
-            select_exprs.append(f"{start_epoch_expr} AS start_ts")
-        elif c in cols:
-            select_exprs.append(c)
-        else:
-            select_exprs.append(f"NULL AS {c}")
-    select_sql = ", ".join(select_exprs)
-
-    rows = conn.execute(
-        f"SELECT {select_sql} FROM {table} "
-        f"WHERE {selector.where_old} AND {start_epoch_expr} >= ? AND {start_epoch_expr} <= ? "
-        f"ORDER BY {start_epoch_expr} ASC",
-        (*selector.params_old, overlap_start_ts, overlap_end_ts),
-    ).fetchall()
-
-    print("  start_ts,state,min,mean,max,sum,last_reset_ts")
-    for r in rows:
-        start_ts = _fmt_ts(None if r[0] is None else float(r[0]))
-        state = "" if r[1] is None else str(r[1])
-        vmin = "" if r[2] is None else str(r[2])
-        mean = "" if r[3] is None else str(r[3])
-        vmax = "" if r[4] is None else str(r[4])
-        vsum = "" if r[5] is None else str(r[5])
-        last_reset_ts = _fmt_ts(None if r[6] is None else float(r[6]))
-        print(f"  {start_ts},{state},{vmin},{mean},{vmax},{vsum},{last_reset_ts}")
 
 
 def _summarize_omitted_rows(
@@ -333,16 +264,6 @@ def _get_state_class(entity: dict[str, Any] | None) -> str | None:
         if isinstance(v, str) and v:
             return v
     return None
-
-
-def _max_defined(values: Iterable[float | None]) -> float | None:
-    vs = [v for v in values if v is not None]
-    return max(vs) if vs else None
-
-
-def _min_defined(values: Iterable[float | None]) -> float | None:
-    vs = [v for v in values if v is not None]
-    return min(vs) if vs else None
 
 
 def _copy_rows(
