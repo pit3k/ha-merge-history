@@ -154,7 +154,7 @@ def _latest_sum(conn: sqlite3.Connection, table: str, selector: StatsSelector) -
         raise MergeHistoryError(f"{table} has no sum column")
     start_epoch_expr = _start_ts_expr(cols)
     row = conn.execute(
-        f"SELECT sum FROM {table} WHERE {selector.where_old} AND sum IS NOT NULL "
+        f"SELECT sum FROM {table} WHERE {selector.where_old} "
         f"ORDER BY {start_epoch_expr} DESC LIMIT 1",
         selector.params_old,
     ).fetchone()
@@ -171,28 +171,13 @@ def _earliest_new_sum_state(conn: sqlite3.Connection, table: str, selector: Stat
         raise MergeHistoryError(f"{table} has no state column")
     start_epoch_expr = _start_ts_expr(cols)
     row = conn.execute(
-        f"SELECT sum, state FROM {table} WHERE {selector.where_new} AND sum IS NOT NULL AND state IS NOT NULL "
+        f"SELECT sum, state FROM {table} WHERE {selector.where_new} "
         f"ORDER BY {start_epoch_expr} ASC LIMIT 1",
         selector.params_new,
     ).fetchone()
     if row is None or row[0] is None or row[1] is None:
         raise MergeHistoryError(f"No (sum,state) rows found for new entity in {table}")
     return float(row[0]), float(row[1])
-
-
-def _earliest_sum(conn: sqlite3.Connection, table: str, selector: StatsSelector) -> float:
-    cols = _columns(conn, table)
-    if "sum" not in cols:
-        raise MergeHistoryError(f"{table} has no sum column")
-    start_epoch_expr = _start_ts_expr(cols)
-    row = conn.execute(
-        f"SELECT sum FROM {table} WHERE {selector.where_new} AND sum IS NOT NULL "
-        f"ORDER BY {start_epoch_expr} ASC LIMIT 1",
-        selector.params_new,
-    ).fetchone()
-    if row is None or row[0] is None:
-        raise MergeHistoryError(f"No sum rows found for new entity in {table}")
-    return float(row[0])
 
 
 def _fmt_ts(ts: float | None) -> str:
@@ -314,7 +299,7 @@ def _update_sums(conn: sqlite3.Connection, table: str, selector: StatsSelector, 
     if "sum" not in cols:
         return 0
     cur = conn.execute(
-        f"UPDATE {table} SET sum = sum + ? WHERE {selector.where_new} AND sum IS NOT NULL",
+        f"UPDATE {table} SET sum = sum + ? WHERE {selector.where_new}",
         (offset, *selector.params_new),
     )
     return int(cur.rowcount or 0)
@@ -340,7 +325,19 @@ def run_merge(*, old_entity_id: str, new_entity_id: str, db_path: Path, storage_
     try:
         conn.row_factory = sqlite3.Row
 
-        plans: list[TablePlan] = []
+        @dataclass(frozen=True)
+        class _TableInfo:
+            table: str
+            selector: StatsSelector
+            old_count: int
+            old_start: float | None
+            old_end: float | None
+            new_count: int
+            new_start: float | None
+            new_end: float | None
+
+        table_infos: list[_TableInfo] = []
+        overlaps: list[tuple[str, StatsSelector, float, float]] = []  # (table, selector, new_start, overlap_end)
 
         for table in ("statistics", "statistics_short_term"):
             if not _table_exists(conn, table):
@@ -348,26 +345,58 @@ def run_merge(*, old_entity_id: str, new_entity_id: str, db_path: Path, storage_
             sel = _resolve_stats_selector(conn, table, old_entity_id, new_entity_id)
             old_count, old_start, old_end = _stats_span(conn, table, sel.where_old, sel.params_old)
             new_count, new_start, new_end = _stats_span(conn, table, sel.where_new, sel.params_new)
+            table_infos.append(_TableInfo(table, sel, old_count, old_start, old_end, new_count, new_start, new_end))
 
-            plans.append(TablePlan(table, old_count, old_start, old_end, new_count, new_start, new_end))
-
-            # Simple overlap detection: if overlap exists, print overlapping OLD rows and abort.
             if old_end is not None and new_start is not None and old_end >= new_start:
                 overlap_end = old_end if new_end is None else min(old_end, new_end)
+                overlaps.append((table, sel, float(new_start), float(overlap_end)))
+
+        if not table_infos:
+            raise MergeHistoryError("No statistics tables found")
+
+        copy_filters: dict[str, tuple[str, tuple[Any, ...]]] = {}
+
+        if overlaps:
+            for table, sel, overlap_start, overlap_end in overlaps:
                 _print_overlapping_old_rows(
                     conn,
                     table,
                     sel,
-                    overlap_start_ts=new_start,
+                    overlap_start_ts=overlap_start,
                     overlap_end_ts=overlap_end,
                 )
+
+            ans = input("Overlap found. Skip overlapping OLD rows and continue? [y/N] ")
+            if not _parse_bool_prompt(ans):
+                first_table, _, overlap_start, _ = overlaps[0]
                 raise MergeHistoryError(
                     "Precondition failed: old latest stats must precede new earliest stats "
-                    f"for {table} (old={_fmt_ts(old_end)}, new={_fmt_ts(new_start)})"
+                    f"for {first_table} (overlap at/after {_fmt_ts(overlap_start)})"
                 )
 
-        if not plans:
-            raise MergeHistoryError("No statistics tables found")
+            # Skip all old rows at/after the first new timestamp for that table.
+            for table, _sel, overlap_start, _overlap_end in overlaps:
+                cols = _columns(conn, table)
+                start_epoch_expr = _start_ts_expr(cols)
+                copy_filters[table] = (f"AND {start_epoch_expr} < ?", (overlap_start,))
+
+        plans: list[TablePlan] = []
+        for info in table_infos:
+            extra_where_sql, extra_params = copy_filters.get(info.table, ("", ()))
+            eff_old_where = info.selector.where_old + (" " + extra_where_sql if extra_where_sql else "")
+            eff_old_params = (*info.selector.params_old, *extra_params)
+            eff_old_count, eff_old_start, eff_old_end = _stats_span(conn, info.table, eff_old_where, eff_old_params)
+            plans.append(
+                TablePlan(
+                    info.table,
+                    eff_old_count,
+                    eff_old_start,
+                    eff_old_end,
+                    info.new_count,
+                    info.new_start,
+                    info.new_end,
+                )
+            )
 
         offset = 0.0
         if old_sc in {"total", "total_increasing"}:
@@ -418,7 +447,8 @@ def run_merge(*, old_entity_id: str, new_entity_id: str, db_path: Path, storage_
                 if not _table_exists(conn, table):
                     continue
                 sel = _resolve_stats_selector(conn, table, old_entity_id, new_entity_id)
-                copied_total += _copy_rows(conn, table, sel)
+                extra_where_sql, extra_params = copy_filters.get(table, ("", ()))
+                copied_total += _copy_rows(conn, table, sel, extra_where_sql=extra_where_sql, extra_params=extra_params)
 
         print(f"Done. Copied {copied_total} rows into {new_entity_id}.")
 
