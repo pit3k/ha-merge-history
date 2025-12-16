@@ -102,7 +102,6 @@ class TablePlan:
     old_count: int
     old_start: float | None
     old_end: float | None
-    old_skipped_overlap: int
     new_count: int
     new_start: float | None
     new_end: float | None
@@ -122,152 +121,31 @@ def _stats_span(conn: sqlite3.Connection, table: str, where_sql: str, params: tu
     return int(row[0] or 0), (None if row[1] is None else float(row[1])), (None if row[2] is None else float(row[2]))
 
 
-def _pick_constant_value_col(*, cols: set[str], state_class: str) -> str | None:
-    # Prefer the value that best represents "no change" for the entity type.
-    if state_class == "measurement":
-        # In HA statistics tables, measurement sensors often use mean/min/max,
-        # and state can be NULL. Prefer mean when available.
-        if "mean" in cols:
-            return "mean"
-        if "state" in cols:
-            return "state"
-    if "state" in cols:
-        return "state"
-    if state_class in {"total", "total_increasing"} and "sum" in cols:
-        return "sum"
-    # Fallbacks for unusual schemas.
-    if "sum" in cols:
-        return "sum"
-    return None
-
-
-def _latest_state(conn: sqlite3.Connection, table: str, selector: StatsSelector) -> float:
-    cols = _columns(conn, table)
-    if "state" not in cols:
-        raise MergeHistoryError(f"{table} has no state column")
-    start_epoch_expr = _start_ts_expr(cols)
-    row = conn.execute(
-        f"SELECT state FROM {table} WHERE {selector.where_old} AND state IS NOT NULL "
-        f"ORDER BY {start_epoch_expr} DESC LIMIT 1",
-        selector.params_old,
-    ).fetchone()
-    if row is None or row[0] is None:
-        raise MergeHistoryError(f"No state rows found for old entity in {table}")
-    return float(row[0])
-
-
-def _overlap_constant_filter(
+def _print_overlapping_old_rows(
     conn: sqlite3.Connection,
     table: str,
     selector: StatsSelector,
     *,
-    state_class: str,
-    new_start_ts: float,
-    overlap_end_ts: float | None,
-) -> tuple[str, tuple[Any, ...], int]:
+    overlap_start_ts: float,
+    overlap_end_ts: float,
+) -> None:
     cols = _columns(conn, table)
     start_epoch_expr = _start_ts_expr(cols)
-    value_col = _pick_constant_value_col(cols=cols, state_class=state_class)
-    if value_col is None:
-        raise MergeHistoryError(f"Overlapping stats detected in {table}, but no suitable value column to verify constancy")
+    conn.row_factory = sqlite3.Row
+    print(f"Overlap detected in {table}; printing overlapping OLD rows (all columns):")
+    print(f"- range: {_fmt_ts(overlap_start_ts)} .. {_fmt_ts(overlap_end_ts)}")
 
-    overlap_end = new_start_ts if overlap_end_ts is None else float(overlap_end_ts)
-    if overlap_end < new_start_ts:
-        overlap_end = new_start_ts
+    rows = conn.execute(
+        f"SELECT * FROM {table} WHERE {selector.where_old} AND {start_epoch_expr} >= ? AND {start_epoch_expr} <= ? "
+        f"ORDER BY {start_epoch_expr} ASC",
+        (*selector.params_old, overlap_start_ts, overlap_end_ts),
+    ).fetchall()
 
-    # If we selected state but there are no non-null state values to compare, optionally fall back to sum.
-    if value_col == "state" and "sum" in cols:
-        has_overlap_state = conn.execute(
-            f"SELECT 1 FROM {table} WHERE {selector.where_old} AND {start_epoch_expr} >= ? AND state IS NOT NULL LIMIT 1",
-            (*selector.params_old, new_start_ts),
-        ).fetchone()
-        has_prior_state = conn.execute(
-            f"SELECT 1 FROM {table} WHERE {selector.where_old} AND {start_epoch_expr} < ? AND state IS NOT NULL LIMIT 1",
-            (*selector.params_old, new_start_ts),
-        ).fetchone()
-        if has_overlap_state is None or has_prior_state is None:
-            has_overlap_sum = conn.execute(
-                f"SELECT 1 FROM {table} WHERE {selector.where_old} AND {start_epoch_expr} >= ? AND sum IS NOT NULL LIMIT 1",
-                (*selector.params_old, new_start_ts),
-            ).fetchone()
-            has_prior_sum = conn.execute(
-                f"SELECT 1 FROM {table} WHERE {selector.where_old} AND {start_epoch_expr} < ? AND sum IS NOT NULL LIMIT 1",
-                (*selector.params_old, new_start_ts),
-            ).fetchone()
-            if has_overlap_sum is not None and has_prior_sum is not None:
-                value_col = "sum"
-
-    def _print_overlap_rows(*, label: str, where_sql: str, params: tuple[Any, ...]) -> None:
-        total_row = conn.execute(
-            f"SELECT COUNT(*) FROM {table} WHERE {where_sql}",
-            params,
-        ).fetchone()
-        total = 0 if total_row is None or total_row[0] is None else int(total_row[0] or 0)
-        print(f"  {label}: {total} rows")
-        if total <= 0:
-            return
-        cap = 50
-        rows = conn.execute(
-            f"SELECT {start_epoch_expr} AS ts, {value_col} AS v FROM {table} "
-            f"WHERE {where_sql} ORDER BY {start_epoch_expr} ASC LIMIT {cap}",
-            params,
-        ).fetchall()
-        for r in rows:
-            ts = None if r[0] is None else float(r[0])
-            print(f"    {_fmt_ts(ts)}  {value_col}={r[1]!r}")
-        if total > cap:
-            print(f"    ... ({total - cap} more rows)")
-
-    print(f"Overlap detected in {table} (showing {value_col}, ignoring NULL {value_col}):")
-    print(f"- range: {_fmt_ts(new_start_ts)} .. {_fmt_ts(overlap_end)}")
-    _print_overlap_rows(
-        label="old",
-        where_sql=f"{selector.where_old} AND {start_epoch_expr} >= ? AND {start_epoch_expr} <= ? AND {value_col} IS NOT NULL",
-        params=(*selector.params_old, new_start_ts, overlap_end),
-    )
-    _print_overlap_rows(
-        label="new",
-        where_sql=f"{selector.where_new} AND {start_epoch_expr} >= ? AND {start_epoch_expr} <= ? AND {value_col} IS NOT NULL",
-        params=(*selector.params_new, new_start_ts, overlap_end),
-    )
-
-    # If there are no overlapping old rows with non-null values, treat this as no meaningful overlap.
-    overlap_total_row = conn.execute(
-        f"SELECT COUNT(*) FROM {table} WHERE {selector.where_old} AND {start_epoch_expr} >= ? AND {value_col} IS NOT NULL",
-        (*selector.params_old, new_start_ts),
-    ).fetchone()
-    overlap_total = 0 if overlap_total_row is None or overlap_total_row[0] is None else int(overlap_total_row[0] or 0)
-    if overlap_total <= 0:
-        return "", (), 0
-
-    # Get the value of the last old row strictly before the new series begins.
-    prior = conn.execute(
-        f"SELECT {value_col} FROM {table} "
-        f"WHERE {selector.where_old} AND {start_epoch_expr} < ? AND {value_col} IS NOT NULL "
-        f"ORDER BY {start_epoch_expr} DESC LIMIT 1",
-        (*selector.params_old, new_start_ts),
-    ).fetchone()
-    if prior is None:
-        raise MergeHistoryError(
-            f"Overlapping stats detected in {table}, but no old row exists before new start_ts to compare against"
-        )
-    prior_value = prior[0]
-
-    overlap_ok_row = conn.execute(
-        f"SELECT COUNT(*) FROM {table} "
-        f"WHERE {selector.where_old} AND {start_epoch_expr} >= ? AND {value_col} IS NOT NULL AND {value_col} = ?",
-        (*selector.params_old, new_start_ts, prior_value),
-    ).fetchone()
-    overlap_ok = 0 if overlap_ok_row is None or overlap_ok_row[0] is None else int(overlap_ok_row[0] or 0)
-
-    if overlap_ok != overlap_total:
-        raise MergeHistoryError(
-            f"Precondition failed: {table} overlaps and overlapping old rows are not constant (start_ts >= {_fmt_ts(new_start_ts)})"
-        )
-
-    extra_where_sql = f"AND NOT ({start_epoch_expr} >= ? AND {value_col} = ?)"
-    extra_params = (new_start_ts, prior_value)
-    return extra_where_sql, extra_params, overlap_total
+    print(f"- old overlapping rows: {len(rows)}")
+    for r in rows:
+        d = dict(r)
+        # Emit a stable, readable representation.
+        print(json.dumps(d, ensure_ascii=False, sort_keys=True, default=str))
 
 
 def _latest_sum(conn: sqlite3.Connection, table: str, selector: StatsSelector) -> float:
@@ -464,59 +342,25 @@ def run_merge(*, old_entity_id: str, new_entity_id: str, db_path: Path, storage_
 
         plans: list[TablePlan] = []
 
-        copy_filters: dict[str, tuple[str, tuple[Any, ...]]] = {}
-
         for table in ("statistics", "statistics_short_term"):
             if not _table_exists(conn, table):
                 continue
             sel = _resolve_stats_selector(conn, table, old_entity_id, new_entity_id)
+            old_count, old_start, old_end = _stats_span(conn, table, sel.where_old, sel.params_old)
+            new_count, new_start, new_end = _stats_span(conn, table, sel.where_new, sel.params_new)
 
-            cols = _columns(conn, table)
-            value_col = _pick_constant_value_col(cols=cols, state_class=old_sc)
-            base_old_where = sel.where_old
-            base_new_where = sel.where_new
-            base_old_params: tuple[Any, ...] = sel.params_old
-            base_new_params: tuple[Any, ...] = sel.params_new
-            if value_col is not None:
-                base_old_where = base_old_where + f" AND {value_col} IS NOT NULL"
-                base_new_where = base_new_where + f" AND {value_col} IS NOT NULL"
+            plans.append(TablePlan(table, old_count, old_start, old_end, new_count, new_start, new_end))
 
-            # Get base spans first so we can decide if overlap handling is needed.
-            base_old_count, base_old_start, base_old_end = _stats_span(conn, table, base_old_where, base_old_params)
-            new_count, new_start, new_end = _stats_span(conn, table, base_new_where, base_new_params)
-
-            extra_where_sql = ""
-            extra_params: tuple[Any, ...] = ()
-            old_skipped_overlap = 0
-
-            if base_old_end is not None and new_start is not None and base_old_end >= new_start:
-                extra_where_sql, extra_params, old_skipped_overlap = _overlap_constant_filter(
+            # Simple overlap detection: if overlap exists, print overlapping OLD rows and abort.
+            if old_end is not None and new_start is not None and old_end >= new_start:
+                overlap_end = old_end if new_end is None else min(old_end, new_end)
+                _print_overlapping_old_rows(
                     conn,
                     table,
                     sel,
-                    state_class=old_sc,
-                    new_start_ts=new_start,
-                    overlap_end_ts=(None if new_end is None else min(base_old_end, new_end)),
+                    overlap_start_ts=new_start,
+                    overlap_end_ts=overlap_end,
                 )
-
-            # Always exclude NULLs for the chosen overlap value column from the effective old span and copy.
-            null_filter_sql = f"AND {value_col} IS NOT NULL" if value_col is not None else ""
-            combined_where_sql = (null_filter_sql + (" " + extra_where_sql if extra_where_sql else "")).strip()
-            copy_filters[table] = (combined_where_sql, extra_params)
-
-            old_count, old_start, old_end = _stats_span(
-                conn,
-                table,
-                sel.where_old + (" " + combined_where_sql if combined_where_sql else ""),
-                (*sel.params_old, *extra_params),
-            )
-
-            plans.append(
-                TablePlan(table, old_count, old_start, old_end, old_skipped_overlap, new_count, new_start, new_end)
-            )
-
-            # Per-table precondition: after overlap filtering (if any), old must end before new starts.
-            if old_end is not None and new_start is not None and not (old_end < new_start):
                 raise MergeHistoryError(
                     "Precondition failed: old latest stats must precede new earliest stats "
                     f"for {table} (old={_fmt_ts(old_end)}, new={_fmt_ts(new_start)})"
@@ -548,8 +392,6 @@ def run_merge(*, old_entity_id: str, new_entity_id: str, db_path: Path, storage_
                 f"- {p.table}: copy {p.old_count} rows [{_fmt_ts(p.old_start)} - {_fmt_ts(p.old_end)}] "
                 f"into {new_entity_id}"
             )
-            if p.old_skipped_overlap:
-                print(f"  {p.table}: skip {p.old_skipped_overlap} redundant overlapping rows (unchanged value)")
             if old_sc in {"total", "total_increasing"}:
                 print(
                     f"  {p.table}: update {p.new_count} rows [{_fmt_ts(p.new_start)} - {_fmt_ts(p.new_end)}] "
@@ -576,8 +418,7 @@ def run_merge(*, old_entity_id: str, new_entity_id: str, db_path: Path, storage_
                 if not _table_exists(conn, table):
                     continue
                 sel = _resolve_stats_selector(conn, table, old_entity_id, new_entity_id)
-                extra_where_sql, extra_params = copy_filters.get(table, ("", ()))
-                copied_total += _copy_rows(conn, table, sel, extra_where_sql=extra_where_sql, extra_params=extra_params)
+                copied_total += _copy_rows(conn, table, sel)
 
         print(f"Done. Copied {copied_total} rows into {new_entity_id}.")
 
