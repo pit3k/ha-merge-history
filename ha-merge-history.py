@@ -413,18 +413,16 @@ def run_merge(*, old_entity_id: str, new_entity_id: str, db_path: Path, storage_
         print("ha-merge-history plan:")
         print(f"- db: {db_path}")
         print(f"- state_class: {old_sc}")
-        if old_sc in {"total", "total_increasing"}:
-            print(f"- sum offset: {offset}")
 
         for p in plans:
+            print(f"- {p.table}:")
             print(
-                f"- {p.table}: copy {p.old_count} rows [{_fmt_ts(p.old_start)} - {_fmt_ts(p.old_end)}] "
-                f"into {new_entity_id}"
+                f"  [{_fmt_ts(p.old_start)} - {_fmt_ts(p.old_end)}] copy {p.old_count} rows"
             )
             if old_sc in {"total", "total_increasing"}:
                 print(
-                    f"  {p.table}: update {p.new_count} rows [{_fmt_ts(p.new_start)} - {_fmt_ts(p.new_end)}] "
-                    f"for {new_entity_id} (sum += {offset})"
+                    f"  [{_fmt_ts(p.new_start)} - {_fmt_ts(p.new_end)}] update {p.new_count} rows "
+                    f"(sum += {offset})"
                 )
 
         answer = input("Proceed to update DB? [y/N] ")
@@ -450,7 +448,7 @@ def run_merge(*, old_entity_id: str, new_entity_id: str, db_path: Path, storage_
                 extra_where_sql, extra_params = copy_filters.get(table, ("", ()))
                 copied_total += _copy_rows(conn, table, sel, extra_where_sql=extra_where_sql, extra_params=extra_params)
 
-        print(f"Done. Copied {copied_total} rows into {new_entity_id}.")
+        print(f"Done. Copied {copied_total} rows.")
 
     finally:
         conn.close()
