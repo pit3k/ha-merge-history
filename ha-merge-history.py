@@ -124,6 +124,13 @@ def _stats_span(conn: sqlite3.Connection, table: str, where_sql: str, params: tu
 
 def _pick_constant_value_col(*, cols: set[str], state_class: str) -> str | None:
     # Prefer the value that best represents "no change" for the entity type.
+    if state_class == "measurement":
+        # In HA statistics tables, measurement sensors often use mean/min/max,
+        # and state can be NULL. Prefer mean when available.
+        if "mean" in cols:
+            return "mean"
+        if "state" in cols:
+            return "state"
     if "state" in cols:
         return "state"
     if state_class in {"total", "total_increasing"} and "sum" in cols:
