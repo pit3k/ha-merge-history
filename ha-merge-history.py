@@ -565,9 +565,9 @@ def run_merge_many(
 
             _pline()
 
+        _pline()
         _pline(f"DB: {db_path}")
-        if dry_run:
-            _pline()
+        _pline()
 
         for old_entity_id, new_entity_id in pairs:
             plan = _plan_pair(conn, entities=entities, old_entity_id=old_entity_id, new_entity_id=new_entity_id)
@@ -576,16 +576,18 @@ def run_merge_many(
             _emit_pair_report(old_entity_id, new_entity_id, plan)
 
         if not dry_run:
-            answer = input("CONFIRMATION [y/N] ")
+            answer = input("Apply changes to DB? [y/N] ")
             if not _parse_bool_prompt(answer):
                 print("Aborted.")
                 return
 
         if dry_run:
-            _pline("*** THESE SQL WOULD BE EXECUTED ***")
+            print("")
             print("BEGIN;")
             _apply_pair_plans(conn, pair_plans, dry_run=True)
+            print("")
             print("COMMIT;")
+            print("")
             return
 
         with conn:
