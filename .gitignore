@@ -18,3 +18,5 @@ htmlcov/
 .DS_Store
 Thumbs.db
 .vscode/
+home-assistant_v2.db
+.storage/core.entity_registry
