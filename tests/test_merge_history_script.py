@@ -109,7 +109,7 @@ class TestMergeHistoryScript(unittest.TestCase):
                 "SELECT start_ts, sum FROM statistics WHERE metadata_id=2 ORDER BY start_ts"
             ).fetchall()
             self.assertEqual([r[0] for r in rows], [0.0, 3600.0, 7200.0, 10800.0])
-            self.assertEqual([float(r[1]) for r in rows], [10.0, 12.0, 12.0, 13.0])
+            self.assertEqual([float(r[1]) for r in rows], [10.0, 12.0, 15.0, 16.0])
         finally:
             ro.close()
 
@@ -166,7 +166,7 @@ class TestMergeHistoryScript(unittest.TestCase):
             ).fetchall()
             # Should only have the two original new rows plus the non-redundant part of old (0 and 3600).
             self.assertEqual([r[0] for r in rows], [0.0, 3600.0, 7200.0, 10800.0])
-            self.assertEqual([float(r[1]) for r in rows], [10.0, 12.0, 12.0, 13.0])
+            self.assertEqual([float(r[1]) for r in rows], [10.0, 12.0, 15.0, 16.0])
         finally:
             ro.close()
 
@@ -194,7 +194,7 @@ class TestMergeHistoryScript(unittest.TestCase):
                     (1, 0.0, 1.0, 10.0),
                     (1, 3600.0, 2.0, 12.0),
                     (1, 7200.0, 2.0, 12.0),
-                    (1, 10800.0, 2.0, 13.0),
+                    (1, 10800.0, 3.0, 13.0),
                     (2, 7200.0, 3.0, 1.0),
                 ],
             )

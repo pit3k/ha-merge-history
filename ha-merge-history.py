@@ -124,16 +124,29 @@ def _stats_span(conn: sqlite3.Connection, table: str, where_sql: str, params: tu
 
 def _pick_constant_value_col(*, cols: set[str], state_class: str) -> str | None:
     # Prefer the value that best represents "no change" for the entity type.
-    if state_class in {"total", "total_increasing"} and "sum" in cols:
-        return "sum"
-    if state_class == "measurement" and "state" in cols:
-        return "state"
-    # Fallbacks for unusual schemas.
     if "state" in cols:
         return "state"
+    if state_class in {"total", "total_increasing"} and "sum" in cols:
+        return "sum"
+    # Fallbacks for unusual schemas.
     if "sum" in cols:
         return "sum"
     return None
+
+
+def _latest_state(conn: sqlite3.Connection, table: str, selector: StatsSelector) -> float:
+    cols = _columns(conn, table)
+    if "state" not in cols:
+        raise MergeHistoryError(f"{table} has no state column")
+    start_epoch_expr = _start_ts_expr(cols)
+    row = conn.execute(
+        f"SELECT state FROM {table} WHERE {selector.where_old} AND state IS NOT NULL "
+        f"ORDER BY {start_epoch_expr} DESC LIMIT 1",
+        selector.params_old,
+    ).fetchone()
+    if row is None or row[0] is None:
+        raise MergeHistoryError(f"No state rows found for old entity in {table}")
+    return float(row[0])
 
 
 def _overlap_constant_filter(
@@ -202,6 +215,23 @@ def _latest_sum(conn: sqlite3.Connection, table: str, selector: StatsSelector) -
     if row is None or row[0] is None:
         raise MergeHistoryError(f"No sum rows found for old entity in {table}")
     return float(row[0])
+
+
+def _earliest_new_sum_state(conn: sqlite3.Connection, table: str, selector: StatsSelector) -> tuple[float, float]:
+    cols = _columns(conn, table)
+    if "sum" not in cols:
+        raise MergeHistoryError(f"{table} has no sum column")
+    if "state" not in cols:
+        raise MergeHistoryError(f"{table} has no state column")
+    start_epoch_expr = _start_ts_expr(cols)
+    row = conn.execute(
+        f"SELECT sum, state FROM {table} WHERE {selector.where_new} AND sum IS NOT NULL AND state IS NOT NULL "
+        f"ORDER BY {start_epoch_expr} ASC LIMIT 1",
+        selector.params_new,
+    ).fetchone()
+    if row is None or row[0] is None or row[1] is None:
+        raise MergeHistoryError(f"No (sum,state) rows found for new entity in {table}")
+    return float(row[0]), float(row[1])
 
 
 def _earliest_sum(conn: sqlite3.Connection, table: str, selector: StatsSelector) -> float:
@@ -414,13 +444,15 @@ def run_merge(*, old_entity_id: str, new_entity_id: str, db_path: Path, storage_
 
         offset = 0.0
         if old_sc in {"total", "total_increasing"}:
-            # Compute offset from long-term statistics table when available.
+            # Offset for monotonic sum: shift new sums so they continue from old sum,
+            # assuming the new entity's state started from 0.
+            # offset = last_old_sum - first_new_sum + first_new_state
             if not _table_exists(conn, "statistics"):
                 raise MergeHistoryError("statistics table missing (required for offset calculation)")
             sel_stats = _resolve_stats_selector(conn, "statistics", old_entity_id, new_entity_id)
-            old_last = _latest_sum(conn, "statistics", sel_stats)
-            new_first = _earliest_sum(conn, "statistics", sel_stats)
-            offset = old_last - new_first
+            last_old_sum = _latest_sum(conn, "statistics", sel_stats)
+            first_new_sum, first_new_state = _earliest_new_sum_state(conn, "statistics", sel_stats)
+            offset = last_old_sum - first_new_sum + first_new_state
 
         print("ha-merge-history plan:")
         print(f"- db: {db_path}")
