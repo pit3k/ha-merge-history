@@ -182,9 +182,9 @@ def _summarize_omitted_rows(
     cols = _columns(conn, table)
     start_epoch_expr = _start_ts_expr(cols)
 
-    wanted = ["state", "min", "mean", "max", "sum", "last_reset_ts"]
     select_exprs: list[str] = []
-    for c in wanted:
+    select_exprs.append("id")
+    for c in ("state", "min", "mean", "max", "sum", "last_reset_ts"):
         if c in cols:
             select_exprs.append(c)
         else:
@@ -201,24 +201,21 @@ def _summarize_omitted_rows(
     if not rows:
         return 0, []
 
-    unique: list[dict[str, Any]] = []
-    seen: set[str] = set()
+    all_rows: list[dict[str, Any]] = []
     for r in rows:
-        rep: dict[str, Any] = {
-            "state": r[0],
-            "min": r[1],
-            "mean": r[2],
-            "max": r[3],
-            "sum": r[4],
-            "last_reset_ts": (None if r[5] is None else _fmt_ts(float(r[5]))),
-        }
-        key = json.dumps(rep, ensure_ascii=False, sort_keys=True, default=str)
-        if key in seen:
-            continue
-        seen.add(key)
-        unique.append(rep)
+        all_rows.append(
+            {
+                "id": r[0],
+                "state": r[1],
+                "min": r[2],
+                "mean": r[3],
+                "max": r[4],
+                "sum": r[5],
+                "last_reset_ts": (None if r[6] is None else _fmt_ts(float(r[6]))),
+            }
+        )
 
-    return len(rows), unique
+    return len(rows), all_rows
 
 
 def _latest_sum(conn: sqlite3.Connection, table: str, selector: StatsSelector) -> float:

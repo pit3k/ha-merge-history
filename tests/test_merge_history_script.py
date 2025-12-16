@@ -84,10 +84,10 @@ class TestMergeHistoryScript(unittest.TestCase):
         try:
             conn.execute("CREATE TABLE statistics_meta (id INTEGER, statistic_id TEXT)")
             conn.execute(
-                "CREATE TABLE statistics (metadata_id INTEGER, start_ts REAL, state REAL, sum REAL)"
+                "CREATE TABLE statistics (id INTEGER PRIMARY KEY AUTOINCREMENT, metadata_id INTEGER, start_ts REAL, state REAL, sum REAL)"
             )
             conn.execute(
-                "CREATE TABLE statistics_short_term (metadata_id INTEGER, start_ts REAL, state REAL, sum REAL)"
+                "CREATE TABLE statistics_short_term (id INTEGER PRIMARY KEY AUTOINCREMENT, metadata_id INTEGER, start_ts REAL, state REAL, sum REAL)"
             )
             conn.executemany(
                 "INSERT INTO statistics_meta(id, statistic_id) VALUES(?,?)",
@@ -134,7 +134,7 @@ class TestMergeHistoryScript(unittest.TestCase):
         try:
             conn.execute("CREATE TABLE statistics_meta (id INTEGER, statistic_id TEXT)")
             conn.execute(
-                "CREATE TABLE statistics (metadata_id INTEGER, start_ts REAL, state REAL, sum REAL)"
+                "CREATE TABLE statistics (id INTEGER PRIMARY KEY AUTOINCREMENT, metadata_id INTEGER, start_ts REAL, state REAL, sum REAL)"
             )
             conn.executemany(
                 "INSERT INTO statistics_meta(id, statistic_id) VALUES(?,?)",
@@ -191,7 +191,7 @@ class TestMergeHistoryScript(unittest.TestCase):
         conn = sqlite3.connect(str(db))
         try:
             conn.execute("CREATE TABLE statistics_meta (id INTEGER, statistic_id TEXT)")
-            conn.execute("CREATE TABLE statistics (metadata_id INTEGER, start_ts REAL, state REAL, sum REAL)")
+            conn.execute("CREATE TABLE statistics (id INTEGER PRIMARY KEY AUTOINCREMENT, metadata_id INTEGER, start_ts REAL, state REAL, sum REAL)")
             conn.executemany(
                 "INSERT INTO statistics_meta(id, statistic_id) VALUES(?,?)",
                 [(1, "sensor.old"), (2, "sensor.new")],
@@ -241,7 +241,7 @@ class TestMergeHistoryScript(unittest.TestCase):
         try:
             conn.execute("CREATE TABLE statistics_meta (id INTEGER, statistic_id TEXT)")
             conn.execute(
-                "CREATE TABLE statistics (metadata_id INTEGER, start_ts REAL, state REAL, sum REAL)"
+                "CREATE TABLE statistics (id INTEGER PRIMARY KEY AUTOINCREMENT, metadata_id INTEGER, start_ts REAL, state REAL, sum REAL)"
             )
             conn.executemany(
                 "INSERT INTO statistics_meta(id, statistic_id) VALUES(?,?)",
@@ -292,7 +292,7 @@ class TestMergeHistoryScript(unittest.TestCase):
         try:
             conn.execute("CREATE TABLE statistics_meta (id INTEGER, statistic_id TEXT)")
             conn.execute(
-                "CREATE TABLE statistics (metadata_id INTEGER, start_ts REAL, state REAL, sum REAL)"
+                "CREATE TABLE statistics (id INTEGER PRIMARY KEY AUTOINCREMENT, metadata_id INTEGER, start_ts REAL, state REAL, sum REAL)"
             )
             conn.executemany(
                 "INSERT INTO statistics_meta(id, statistic_id) VALUES(?,?)",
@@ -330,9 +330,9 @@ class TestMergeHistoryScript(unittest.TestCase):
         conn = sqlite3.connect(str(db))
         try:
             conn.execute("CREATE TABLE statistics_meta (id INTEGER, statistic_id TEXT)")
-            conn.execute("CREATE TABLE statistics (metadata_id INTEGER, start_ts REAL, state REAL, sum REAL)")
+            conn.execute("CREATE TABLE statistics (id INTEGER PRIMARY KEY AUTOINCREMENT, metadata_id INTEGER, start_ts REAL, state REAL, sum REAL)")
             conn.execute(
-                "CREATE TABLE statistics_short_term (metadata_id INTEGER, start_ts REAL, state REAL, sum REAL)"
+                "CREATE TABLE statistics_short_term (id INTEGER PRIMARY KEY AUTOINCREMENT, metadata_id INTEGER, start_ts REAL, state REAL, sum REAL)"
             )
             conn.executemany(
                 "INSERT INTO statistics_meta(id, statistic_id) VALUES(?,?)",
@@ -394,7 +394,7 @@ class TestMergeHistoryScript(unittest.TestCase):
             conn.execute("CREATE TABLE statistics_meta (id INTEGER, statistic_id TEXT)")
             # Include mean/min/max to mimic measurement schema.
             conn.execute(
-                "CREATE TABLE statistics (metadata_id INTEGER, start_ts REAL, state REAL, mean REAL, min REAL, max REAL, sum REAL)"
+                "CREATE TABLE statistics (id INTEGER PRIMARY KEY AUTOINCREMENT, metadata_id INTEGER, start_ts REAL, state REAL, mean REAL, min REAL, max REAL, sum REAL)"
             )
             conn.executemany(
                 "INSERT INTO statistics_meta(id, statistic_id) VALUES(?,?)",
@@ -442,9 +442,9 @@ class TestMergeHistoryScript(unittest.TestCase):
         conn = sqlite3.connect(str(db))
         try:
             conn.execute("CREATE TABLE statistics_meta (id INTEGER, statistic_id TEXT)")
-            conn.execute("CREATE TABLE statistics (metadata_id INTEGER, start_ts REAL, state REAL, sum REAL)")
+            conn.execute("CREATE TABLE statistics (id INTEGER PRIMARY KEY AUTOINCREMENT, metadata_id INTEGER, start_ts REAL, state REAL, sum REAL)")
             conn.execute(
-                "CREATE TABLE statistics_short_term (metadata_id INTEGER, start_ts REAL, state REAL, sum REAL)"
+                "CREATE TABLE statistics_short_term (id INTEGER PRIMARY KEY AUTOINCREMENT, metadata_id INTEGER, start_ts REAL, state REAL, sum REAL)"
             )
             conn.executemany(
                 "INSERT INTO statistics_meta(id, statistic_id) VALUES(?,?)",
