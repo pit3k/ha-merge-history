@@ -123,7 +123,7 @@ class TestMergeHistoryScript(unittest.TestCase):
         finally:
             ro.close()
 
-    def test_overlap_decline_skip_aborts_and_prints_old_rows(self) -> None:
+    def test_overlap_decline_aborts_and_prints_ommit_table(self) -> None:
         merge_module = _load_merge_module()
         run_merge = merge_module.run_merge
 
@@ -153,21 +153,34 @@ class TestMergeHistoryScript(unittest.TestCase):
         finally:
             conn.close()
 
-        # Decline skipping overlap => abort
+        # Decline final confirmation => abort (no exception)
         orig_input = self._mock_input(["n"])
         buf = io.StringIO()
         try:
-            with self.assertRaises(merge_module.MergeHistoryError):
-                with contextlib.redirect_stdout(buf):
-                    run_merge(old_entity_id="sensor.old", new_entity_id="sensor.new", db_path=db, storage_dir=storage)
+            with contextlib.redirect_stdout(buf):
+                run_merge(old_entity_id="sensor.old", new_entity_id="sensor.new", db_path=db, storage_dir=storage)
         finally:
             builtins.input = orig_input
 
         out = buf.getvalue()
-        self.assertIn("Overlap detected in statistics", out)
-        self.assertIn("old overlapping rows", out)
-        self.assertIn('"metadata_id": 1', out)
-        self.assertIn('"start_ts": 7200.0', out)
+        self.assertIn("Aborted.", out)
+        self.assertIn("ommit 1 rows:", out)
+        # JSON summary excludes start_ts and includes last_reset_ts
+        self.assertIn('"state": 2.0', out)
+        self.assertIn('"sum": 12.0', out)
+
+        ro = sqlite3.connect(str(db))
+        try:
+            # DB should be unchanged (no copies done)
+            rows = ro.execute(
+                "SELECT metadata_id, start_ts FROM statistics ORDER BY metadata_id, start_ts"
+            ).fetchall()
+            self.assertEqual(
+                rows,
+                [(1, 0.0), (1, 3600.0), (1, 7200.0), (2, 7200.0)],
+            )
+        finally:
+            ro.close()
 
     def test_overlap_accept_skip_proceeds_and_skips_overlapping_old_rows(self) -> None:
         run_merge = _load_merge_module().run_merge
@@ -198,8 +211,8 @@ class TestMergeHistoryScript(unittest.TestCase):
         finally:
             conn.close()
 
-        # Accept skip overlap, then proceed with DB update
-        orig_input = self._mock_input(["y", "y"])
+        # Proceed with DB update (overlap skip is automatic)
+        orig_input = self._mock_input(["y"])
         try:
             with contextlib.redirect_stdout(io.StringIO()):
                 run_merge(old_entity_id="sensor.old", new_entity_id="sensor.new", db_path=db, storage_dir=storage)
@@ -250,8 +263,8 @@ class TestMergeHistoryScript(unittest.TestCase):
         finally:
             conn.close()
 
-        # Accept skip overlap, then proceed
-        orig_input = self._mock_input(["y", "y"])
+        # Proceed; overlap skip is automatic
+        orig_input = self._mock_input(["y"])
         try:
             with contextlib.redirect_stdout(io.StringIO()):
                 run_merge(old_entity_id="sensor.old", new_entity_id="sensor.new", db_path=db, storage_dir=storage)
@@ -300,8 +313,8 @@ class TestMergeHistoryScript(unittest.TestCase):
         finally:
             conn.close()
 
-        # Accept skip overlap => should proceed (no constancy check anymore)
-        orig_input = self._mock_input(["y", "y"])
+        # Proceed; overlap skip is automatic (no constancy check)
+        orig_input = self._mock_input(["y"])
         try:
             with contextlib.redirect_stdout(io.StringIO()):
                 run_merge(old_entity_id="sensor.old", new_entity_id="sensor.new", db_path=db, storage_dir=storage)
