@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ha-merge-history"
+version = "0.1.0"
+description = "Standalone script to merge Home Assistant statistics history between entities."
+requires-python = ">=3.9"
+readme = "README.md"
+
+[project.optional-dependencies]
+test = [
+	"pytest>=7",
+]
+
+# Intentionally no installable package; this project is script-first.
