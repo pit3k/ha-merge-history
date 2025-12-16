@@ -534,7 +534,17 @@ def run_merge_many(
                 print(line)
 
         def _emit_pair_report(old_entity_id: str, new_entity_id: str, plan: PairPlan) -> None:
-            header = f"# {old_entity_id} -> {new_entity_id} ({plan.state_class}) #"
+            old_meta = conn.execute(
+                "SELECT id FROM statistics_meta WHERE statistic_id = ?",
+                (old_entity_id,),
+            ).fetchone()
+            new_meta = conn.execute(
+                "SELECT id FROM statistics_meta WHERE statistic_id = ?",
+                (new_entity_id,),
+            ).fetchone()
+            old_meta_id = "?" if old_meta is None else str(old_meta[0])
+            new_meta_id = "?" if new_meta is None else str(new_meta[0])
+            header = f"# {old_entity_id}({old_meta_id}) -> {new_entity_id}({new_meta_id}) [{plan.state_class}] #"
             bar = "#" * len(header)
             _pline(bar)
             _pline(header)
