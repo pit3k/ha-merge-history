@@ -18,6 +18,17 @@ class MergeHistoryError(RuntimeError):
     pass
 
 
+def _print_sql(sql: str, params: tuple[Any, ...]) -> None:
+    # Keep it simple and readable in console output.
+    formatted = sql
+    for kw in ("INSERT", "SELECT", "FROM", "WHERE"):
+        formatted = formatted.replace(f" {kw} ", f"\n{kw} ")
+    print("")
+    print(formatted)
+    if params:
+        print(f"PARAMS: {params!r}")
+
+
 def _parse_bool_prompt(text: str) -> bool:
     v = text.strip().lower()
     return v in {"y", "yes"}
@@ -273,6 +284,7 @@ def _copy_rows(
     *,
     extra_where_sql: str = "",
     extra_params: tuple[Any, ...] = (),
+    dry_run: bool = False,
 ) -> int:
     cols = _columns(conn, table)
 
@@ -311,23 +323,68 @@ def _copy_rows(
 
     where_sql = selector.where_old + (" " + extra_where_sql if extra_where_sql else "")
 
-    cur = conn.execute(
+    sql = (
         f"INSERT INTO {table} ({dest_cols}) "
-        f"SELECT {select_sql} FROM {table} WHERE {where_sql}",
-        (selector.new_id_value, *selector.params_old, *extra_params),
+        f"SELECT {select_sql} FROM {table} WHERE {where_sql}"
     )
+    params = (selector.new_id_value, *selector.params_old, *extra_params)
+    if dry_run:
+        _print_sql(sql, params)
+        return 0
+
+    cur = conn.execute(sql, params)
     return int(cur.rowcount or 0)
 
 
-def _update_sums(conn: sqlite3.Connection, table: str, selector: StatsSelector, offset: float) -> int:
+def _update_sums(
+    conn: sqlite3.Connection,
+    table: str,
+    selector: StatsSelector,
+    offset: float,
+    *,
+    dry_run: bool = False,
+) -> int:
     cols = _columns(conn, table)
     if "sum" not in cols:
         return 0
-    cur = conn.execute(
-        f"UPDATE {table} SET sum = sum + ? WHERE {selector.where_new}",
-        (offset, *selector.params_new),
-    )
+    sql = f"UPDATE {table} SET sum = sum + ? WHERE {selector.where_new}"
+    params = (offset, *selector.params_new)
+    if dry_run:
+        _print_sql(sql, params)
+        return 0
+    cur = conn.execute(sql, params)
     return int(cur.rowcount or 0)
+
+
+def _apply_pair_plans(conn: sqlite3.Connection, pair_plans: list[PairPlan], *, dry_run: bool) -> int:
+    copied_total = 0
+    for plan in pair_plans:
+        old_entity_id = plan.old_entity_id
+        new_entity_id = plan.new_entity_id
+
+        # Update sums first (existing new rows)
+        if plan.state_class in {"total", "total_increasing"} and plan.offset != 0.0:
+            for table in ("statistics", "statistics_short_term"):
+                if not _table_exists(conn, table):
+                    continue
+                sel = _resolve_stats_selector(conn, table, old_entity_id, new_entity_id)
+                _update_sums(conn, table, sel, plan.offset, dry_run=dry_run)
+
+        # Copy old rows into new, possibly skipping overlap
+        for table in ("statistics", "statistics_short_term"):
+            if not _table_exists(conn, table):
+                continue
+            sel = _resolve_stats_selector(conn, table, old_entity_id, new_entity_id)
+            extra_where_sql, extra_params = plan.copy_filters.get(table, ("", ()))
+            copied_total += _copy_rows(
+                conn,
+                table,
+                sel,
+                extra_where_sql=extra_where_sql,
+                extra_params=extra_params,
+                dry_run=dry_run,
+            )
+    return copied_total
 
 
 def _plan_pair(
@@ -430,6 +487,7 @@ def run_merge_many(
     pairs: list[tuple[str, str]],
     db_path: Path,
     storage_dir: Path,
+    dry_run: bool = False,
 ) -> None:
     if not pairs:
         raise MergeHistoryError("No entity pairs provided")
@@ -443,6 +501,8 @@ def run_merge_many(
         pair_plans: list[PairPlan] = []
 
         print(f"DB: {db_path}")
+        if dry_run:
+            print("DRY-RUN: no changes will be made; printing SQL only")
 
         for old_entity_id, new_entity_id in pairs:
             plan = _plan_pair(conn, entities=entities, old_entity_id=old_entity_id, new_entity_id=new_entity_id)
@@ -472,37 +532,24 @@ def run_merge_many(
                             + json.dumps(omit_row, ensure_ascii=False, sort_keys=True, default=str)
                         )
 
-        answer = input("CONFIRMATION [y/N] ")
-        if not _parse_bool_prompt(answer):
-            print("Aborted.")
+        if not dry_run:
+            answer = input("CONFIRMATION [y/N] ")
+            if not _parse_bool_prompt(answer):
+                print("Aborted.")
+                return
+
+        if dry_run:
+            print("")
+            print("*** THESE SQL WOULD BE EXECUTED ***")
+            _apply_pair_plans(conn, pair_plans, dry_run=True)
+            expected_copied = sum(tp.old_count for pp in pair_plans for tp in pp.table_plans)
+            print("")
+            print(f"Dry-run complete. Would copy {expected_copied} rows.")
+            print("")
             return
 
         with conn:
-            copied_total = 0
-            for plan in pair_plans:
-                old_entity_id = plan.old_entity_id
-                new_entity_id = plan.new_entity_id
-                # Update sums first (existing new rows)
-                if plan.state_class in {"total", "total_increasing"} and plan.offset != 0.0:
-                    for table in ("statistics", "statistics_short_term"):
-                        if not _table_exists(conn, table):
-                            continue
-                        sel = _resolve_stats_selector(conn, table, old_entity_id, new_entity_id)
-                        _update_sums(conn, table, sel, plan.offset)
-
-                # Copy old rows into new, possibly skipping overlap
-                for table in ("statistics", "statistics_short_term"):
-                    if not _table_exists(conn, table):
-                        continue
-                    sel = _resolve_stats_selector(conn, table, old_entity_id, new_entity_id)
-                    extra_where_sql, extra_params = plan.copy_filters.get(table, ("", ()))
-                    copied_total += _copy_rows(
-                        conn,
-                        table,
-                        sel,
-                        extra_where_sql=extra_where_sql,
-                        extra_params=extra_params,
-                    )
+            copied_total = _apply_pair_plans(conn, pair_plans, dry_run=False)
 
         print(f"Done. Copied {copied_total} rows.")
 
@@ -510,8 +557,15 @@ def run_merge_many(
         conn.close()
 
 
-def run_merge(*, old_entity_id: str, new_entity_id: str, db_path: Path, storage_dir: Path) -> None:
-    run_merge_many(pairs=[(old_entity_id, new_entity_id)], db_path=db_path, storage_dir=storage_dir)
+def run_merge(
+    *,
+    old_entity_id: str,
+    new_entity_id: str,
+    db_path: Path,
+    storage_dir: Path,
+    dry_run: bool = False,
+) -> None:
+    run_merge_many(pairs=[(old_entity_id, new_entity_id)], db_path=db_path, storage_dir=storage_dir, dry_run=dry_run)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -523,6 +577,11 @@ def main(argv: list[str] | None = None) -> int:
         "--suffixes",
         help="Comma-separated suffixes to append to both old/new (creates multiple pairs)",
         default=None,
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Do not modify the DB; print the SQL statements that would be executed",
     )
     ns = parser.parse_args(argv)
 
@@ -539,7 +598,12 @@ def main(argv: list[str] | None = None) -> int:
         pairs = [(old_arg, new_arg)]
 
     try:
-        run_merge_many(pairs=pairs, db_path=DEFAULT_DB_PATH, storage_dir=DEFAULT_STORAGE_DIR)
+        run_merge_many(
+            pairs=pairs,
+            db_path=DEFAULT_DB_PATH,
+            storage_dir=DEFAULT_STORAGE_DIR,
+            dry_run=bool(ns.dry_run),
+        )
     except MergeHistoryError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
