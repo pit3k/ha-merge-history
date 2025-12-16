@@ -488,11 +488,14 @@ class TestMergeHistoryScript(unittest.TestCase):
             builtins.input = orig_input
 
         out = buf.getvalue()
-        self.assertIn("DRY-RUN:", out)
-        self.assertIn("*** THESE SQL WOULD BE EXECUTED ***", out)
-        self.assertIn("UPDATE statistics SET sum = sum + ?", out)
+        self.assertIn("-- *** THESE SQL WOULD BE EXECUTED ***", out)
+        self.assertIn("BEGIN;", out)
+        self.assertIn("COMMIT;", out)
+        self.assertNotIn("PARAMS:", out)
+        self.assertNotIn("?", out)
+        self.assertIn("UPDATE statistics SET sum = sum +", out)
+        self.assertIn("WHERE metadata_id = 2", out)
         self.assertIn("INSERT INTO statistics", out)
-        self.assertIn("UPDATE statistics_short_term SET sum = sum + ?", out)
         self.assertIn("INSERT INTO statistics_short_term", out)
         # Formatting: newline before SELECT/FROM/WHERE in insert-select.
         self.assertIn("\nSELECT", out)

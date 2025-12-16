@@ -18,15 +18,42 @@ class MergeHistoryError(RuntimeError):
     pass
 
 
+def _sql_literal(v: Any) -> str:
+    if v is None:
+        return "NULL"
+    if isinstance(v, bool):
+        return "1" if v else "0"
+    if isinstance(v, (int, float)):
+        return repr(v)
+    if isinstance(v, (bytes, bytearray, memoryview)):
+        return "X'" + bytes(v).hex() + "'"
+    s = str(v)
+    return "'" + s.replace("'", "''") + "'"
+
+
+def _inline_sql_params(sql: str, params: tuple[Any, ...]) -> str:
+    if not params:
+        return sql
+    parts = sql.split("?")
+    if len(parts) - 1 != len(params):
+        raise MergeHistoryError(
+            f"SQL placeholder count mismatch: expected {len(parts) - 1}, got {len(params)}"
+        )
+    out = parts[0]
+    for p, tail in zip(params, parts[1:], strict=True):
+        out += _sql_literal(p) + tail
+    return out
+
+
 def _print_sql(sql: str, params: tuple[Any, ...]) -> None:
-    # Keep it simple and readable in console output.
-    formatted = sql
+    # Keep it pasteable into sqlite3 console.
+    formatted = _inline_sql_params(sql, params).strip()
     for kw in ("INSERT", "SELECT", "FROM", "WHERE"):
         formatted = formatted.replace(f" {kw} ", f"\n{kw} ")
     print("")
+    if not formatted.endswith(";"):
+        formatted += ";"
     print(formatted)
-    if params:
-        print(f"PARAMS: {params!r}")
 
 
 def _parse_bool_prompt(text: str) -> bool:
@@ -500,25 +527,29 @@ def run_merge_many(
 
         pair_plans: list[PairPlan] = []
 
-        print(f"DB: {db_path}")
-        if dry_run:
-            print("DRY-RUN: no changes will be made; printing SQL only")
+        def _pline(line: str = "") -> None:
+            if dry_run:
+                if line:
+                    print(f"-- {line}")
+                else:
+                    print("--")
+            else:
+                print(line)
 
-        for old_entity_id, new_entity_id in pairs:
-            plan = _plan_pair(conn, entities=entities, old_entity_id=old_entity_id, new_entity_id=new_entity_id)
-            pair_plans.append(plan)
-
+        def _emit_pair_report(old_entity_id: str, new_entity_id: str, plan: PairPlan) -> None:
             header = f"# {old_entity_id} -> {new_entity_id} ({plan.state_class}) #"
             bar = "#" * len(header)
-            print(bar)
-            print(header)
-            print(bar)
+            _pline(bar)
+            _pline(header)
+            _pline(bar)
 
             for p in plan.table_plans:
-                print(f"{p.table.upper()}:")
-                print(f"  [{_fmt_ts(p.old_start)} - {_fmt_ts(p.old_end)}] copy {p.old_count} rows")
+                _pline(f"{p.table.upper()}:")
+                _pline(f"  [{_fmt_ts(p.old_start)} - {_fmt_ts(p.old_end)}] copy {p.old_count} rows")
                 if plan.state_class in {"total", "total_increasing"}:
-                    print(f"  [{_fmt_ts(p.new_start)} - {_fmt_ts(p.new_end)}] update {p.new_count} rows (sum += {plan.offset})")
+                    _pline(
+                        f"  [{_fmt_ts(p.new_start)} - {_fmt_ts(p.new_end)}] update {p.new_count} rows (sum += {plan.offset})"
+                    )
 
                 if p.table in plan.overlaps:
                     overlap_start, overlap_end = plan.overlaps[p.table]
@@ -527,10 +558,22 @@ def run_merge_many(
                         conn, p.table, sel, overlap_start_ts=overlap_start, overlap_end_ts=overlap_end
                     )
                     if omit_count and omit_row is not None:
-                        print(
+                        _pline(
                             f"  [{_fmt_ts(overlap_start)} - {_fmt_ts(overlap_end)}] ommit {omit_count} rows: "
                             + json.dumps(omit_row, ensure_ascii=False, sort_keys=True, default=str)
                         )
+
+            _pline()
+
+        _pline(f"DB: {db_path}")
+        if dry_run:
+            _pline()
+
+        for old_entity_id, new_entity_id in pairs:
+            plan = _plan_pair(conn, entities=entities, old_entity_id=old_entity_id, new_entity_id=new_entity_id)
+            pair_plans.append(plan)
+
+            _emit_pair_report(old_entity_id, new_entity_id, plan)
 
         if not dry_run:
             answer = input("CONFIRMATION [y/N] ")
@@ -539,13 +582,10 @@ def run_merge_many(
                 return
 
         if dry_run:
-            print("")
-            print("*** THESE SQL WOULD BE EXECUTED ***")
+            _pline("*** THESE SQL WOULD BE EXECUTED ***")
+            print("BEGIN;")
             _apply_pair_plans(conn, pair_plans, dry_run=True)
-            expected_copied = sum(tp.old_count for pp in pair_plans for tp in pp.table_plans)
-            print("")
-            print(f"Dry-run complete. Would copy {expected_copied} rows.")
-            print("")
+            print("COMMIT;")
             return
 
         with conn:
