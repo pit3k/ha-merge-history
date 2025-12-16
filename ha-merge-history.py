@@ -178,7 +178,7 @@ def _summarize_omitted_rows(
     *,
     overlap_start_ts: float,
     overlap_end_ts: float,
-) -> tuple[int, dict[str, Any] | None]:
+) -> tuple[int, list[dict[str, Any]]]:
     cols = _columns(conn, table)
     start_epoch_expr = _start_ts_expr(cols)
 
@@ -199,26 +199,26 @@ def _summarize_omitted_rows(
     ).fetchall()
 
     if not rows:
-        return 0, None
+        return 0, []
 
-    baseline = rows[0]
-    for r in rows[1:]:
-        if r != baseline:
-            raise MergeHistoryError(
-                f"Omitted rows in {table} are not identical on state/min/mean/max/sum/last_reset_ts"
-            )
+    unique: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for r in rows:
+        rep: dict[str, Any] = {
+            "state": r[0],
+            "min": r[1],
+            "mean": r[2],
+            "max": r[3],
+            "sum": r[4],
+            "last_reset_ts": (None if r[5] is None else _fmt_ts(float(r[5]))),
+        }
+        key = json.dumps(rep, ensure_ascii=False, sort_keys=True, default=str)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(rep)
 
-    rep: dict[str, Any] = {
-        "state": baseline[0],
-        "min": baseline[1],
-        "mean": baseline[2],
-        "max": baseline[3],
-        "sum": baseline[4],
-        "last_reset_ts": (
-            None if baseline[5] is None else _fmt_ts(float(baseline[5]))
-        ),
-    }
-    return len(rows), rep
+    return len(rows), unique
 
 
 def _latest_sum(conn: sqlite3.Connection, table: str, selector: StatsSelector) -> float:
@@ -554,14 +554,13 @@ def run_merge_many(
                 if p.table in plan.overlaps:
                     overlap_start, overlap_end = plan.overlaps[p.table]
                     sel = _resolve_stats_selector(conn, p.table, old_entity_id, new_entity_id)
-                    omit_count, omit_row = _summarize_omitted_rows(
+                    omit_count, omit_rows = _summarize_omitted_rows(
                         conn, p.table, sel, overlap_start_ts=overlap_start, overlap_end_ts=overlap_end
                     )
-                    if omit_count and omit_row is not None:
-                        _pline(
-                            f"  [{_fmt_ts(overlap_start)} - {_fmt_ts(overlap_end)}] ommit {omit_count} rows: "
-                            + json.dumps(omit_row, ensure_ascii=False, sort_keys=True, default=str)
-                        )
+                    if omit_count:
+                        _pline(f"  [{_fmt_ts(overlap_start)} - {_fmt_ts(overlap_end)}] ommit {omit_count} rows:")
+                        for r in omit_rows:
+                            _pline("    " + json.dumps(r, ensure_ascii=False, sort_keys=True, default=str))
 
             _pline()
 

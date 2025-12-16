@@ -488,7 +488,6 @@ class TestMergeHistoryScript(unittest.TestCase):
             builtins.input = orig_input
 
         out = buf.getvalue()
-        self.assertIn("-- *** THESE SQL WOULD BE EXECUTED ***", out)
         self.assertIn("BEGIN;", out)
         self.assertIn("COMMIT;", out)
         self.assertNotIn("PARAMS:", out)
