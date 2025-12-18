@@ -226,6 +226,47 @@ def _summarize_omitted_rows(
     return len(rows), all_rows
 
 
+def _overlap_rows_identical_old_new(
+    conn: sqlite3.Connection,
+    table: str,
+    selector: StatsSelector,
+    *,
+    overlap_start_ts: float,
+    overlap_end_ts: float,
+) -> bool:
+    cols = _columns(conn, table)
+    start_epoch_expr = _start_ts_expr(cols)
+
+    ignore = {"id", "created_ts", selector.id_col}
+    compare_cols = [c for c in sorted(cols) if c not in ignore]
+    if "start_ts" in compare_cols:
+        compare_cols.remove("start_ts")
+        compare_cols.insert(0, "start_ts")
+
+    select_exprs: list[str] = []
+    for c in compare_cols:
+        if c == "start_ts":
+            select_exprs.append(f"{start_epoch_expr} AS start_ts")
+        else:
+            select_exprs.append(c)
+    select_sql = ", ".join(select_exprs)
+
+    old_rows = conn.execute(
+        f"SELECT {select_sql} FROM {table} "
+        f"WHERE {selector.where_old} AND {start_epoch_expr} >= ? AND {start_epoch_expr} <= ? "
+        f"ORDER BY {start_epoch_expr} ASC",
+        (*selector.params_old, overlap_start_ts, overlap_end_ts),
+    ).fetchall()
+    new_rows = conn.execute(
+        f"SELECT {select_sql} FROM {table} "
+        f"WHERE {selector.where_new} AND {start_epoch_expr} >= ? AND {start_epoch_expr} <= ? "
+        f"ORDER BY {start_epoch_expr} ASC",
+        (*selector.params_new, overlap_start_ts, overlap_end_ts),
+    ).fetchall()
+
+    return old_rows == new_rows
+
+
 def _latest_sum(conn: sqlite3.Connection, table: str, selector: StatsSelector) -> float:
     cols = _columns(conn, table)
     if "sum" not in cols:
@@ -397,6 +438,8 @@ def _apply_pair_plans(conn: sqlite3.Connection, pair_plans: list[PairPlan], *, d
         # Update sums first (existing new rows)
         if plan.state_class in {"total", "total_increasing"} and plan.offset != 0.0:
             for tp in plan.table_plans:
+                if tp.old_count == 0:
+                    continue
                 if not _table_exists(conn, tp.table):
                     continue
                 sel = _resolve_stats_selector(conn, tp.table, old_entity_id, new_entity_id)
@@ -404,6 +447,8 @@ def _apply_pair_plans(conn: sqlite3.Connection, pair_plans: list[PairPlan], *, d
 
         # Copy old rows into new, possibly skipping overlap
         for tp in plan.table_plans:
+            if tp.old_count == 0:
+                continue
             if not _table_exists(conn, tp.table):
                 continue
             sel = _resolve_stats_selector(conn, tp.table, old_entity_id, new_entity_id)
@@ -484,8 +529,6 @@ def _plan_pair(
         eff_old_where = info.selector.where_old + (" " + extra_where_sql if extra_where_sql else "")
         eff_old_params = (*info.selector.params_old, *extra_params)
         eff_old_count, eff_old_start, eff_old_end = _stats_span(conn, info.table, eff_old_where, eff_old_params)
-        if eff_old_count == 0:
-            continue
         plans.append(
             TablePlan(
                 info.table,
@@ -574,6 +617,40 @@ def run_merge_many(
 
             for p in plan.table_plans:
                 _pline(f"{p.table.upper()}:")
+
+                if p.old_count == 0:
+                    if p.table not in plan.overlaps:
+                        _pline("  - no statistics to copy")
+                        continue
+
+                    overlap_start, overlap_end = plan.overlaps[p.table]
+                    sel = _resolve_stats_selector(conn, p.table, old_entity_id, new_entity_id)
+                    omit_count, omit_rows = _summarize_omitted_rows(
+                        conn, p.table, sel, overlap_start_ts=overlap_start, overlap_end_ts=overlap_end
+                    )
+                    if omit_count == 0:
+                        _pline("  - no statistics to copy")
+                        continue
+
+                    if _overlap_rows_identical_old_new(
+                        conn,
+                        p.table,
+                        sel,
+                        overlap_start_ts=overlap_start,
+                        overlap_end_ts=overlap_end,
+                    ):
+                        _pline("  - all statistics already copied")
+                        continue
+
+                    _pline("  - will not copy statistic, conflictig data")
+                    _pline(f"  [{_fmt_ts(overlap_start)} - {_fmt_ts(overlap_end)}] ommit {omit_count} rows:")
+                    shown = omit_rows[:10]
+                    for r in shown:
+                        _pline("    " + json.dumps(r, ensure_ascii=False, sort_keys=True, default=str))
+                    if omit_count > 10:
+                        _pline(f"    WARNING: omitted rows truncated; showing first 10 of {omit_count}")
+                    continue
+
                 _pline(f"  [{_fmt_ts(p.old_start)} - {_fmt_ts(p.old_end)}] copy {p.old_count} rows")
                 if plan.state_class in {"total", "total_increasing"}:
                     _pline(

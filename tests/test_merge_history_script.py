@@ -281,8 +281,9 @@ class TestMergeHistoryScript(unittest.TestCase):
 
         out = buf.getvalue()
         self.assertIn("Aborted.", out)
-        self.assertNotIn("STATISTICS:", out)
-        self.assertNotIn("ommit", out)
+        self.assertIn("STATISTICS:", out)
+        self.assertIn("- will not copy statistic, conflictig data", out)
+        self.assertIn("ommit 2 rows:", out)
         self.assertNotIn("update", out)
 
         ro = sqlite3.connect(str(db))
@@ -293,6 +294,93 @@ class TestMergeHistoryScript(unittest.TestCase):
             self.assertEqual(rows, [(1, 7200.0), (1, 10800.0), (2, 7200.0), (2, 10800.0)])
         finally:
             ro.close()
+
+    def test_when_ommit_leaves_zero_rows_all_already_copied(self) -> None:
+        merge_module = _load_merge_module()
+        run_merge = merge_module.run_merge
+
+        db = self._make_db()
+        storage = self._make_storage(old_id="sensor.old", new_id="sensor.new", state_class="total_increasing")
+
+        conn = sqlite3.connect(str(db))
+        try:
+            conn.execute("CREATE TABLE statistics_meta (id INTEGER, statistic_id TEXT)")
+            conn.execute(
+                "CREATE TABLE statistics (id INTEGER PRIMARY KEY AUTOINCREMENT, metadata_id INTEGER, start_ts REAL, state REAL, sum REAL)"
+            )
+            conn.executemany(
+                "INSERT INTO statistics_meta(id, statistic_id) VALUES(?,?)",
+                [(1, "sensor.old"), (2, "sensor.new")],
+            )
+            # All old rows overlap, and are identical (except metadata_id/id) to the new rows.
+            conn.executemany(
+                "INSERT INTO statistics(metadata_id, start_ts, state, sum) VALUES(?,?,?,?)",
+                [
+                    (1, 0.0, 1.0, 10.0),
+                    (1, 3600.0, 2.0, 12.0),
+                    (2, 0.0, 1.0, 10.0),
+                    (2, 3600.0, 2.0, 12.0),
+                ],
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        orig_input = self._mock_input(["n"])
+        buf = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(buf):
+                run_merge(old_entity_id="sensor.old", new_entity_id="sensor.new", db_path=db, storage_dir=storage)
+        finally:
+            builtins.input = orig_input
+
+        out = buf.getvalue()
+        self.assertIn("Aborted.", out)
+        self.assertIn("STATISTICS:", out)
+        self.assertIn("- all statistics already copied", out)
+        self.assertNotIn("ommit", out)
+        self.assertNotIn("update", out)
+
+    def test_when_no_old_statistics_print_no_statistics_to_copy(self) -> None:
+        merge_module = _load_merge_module()
+        run_merge = merge_module.run_merge
+
+        db = self._make_db()
+        storage = self._make_storage(old_id="sensor.old", new_id="sensor.new", state_class="measurement")
+
+        conn = sqlite3.connect(str(db))
+        try:
+            conn.execute("CREATE TABLE statistics_meta (id INTEGER, statistic_id TEXT)")
+            conn.execute(
+                "CREATE TABLE statistics (id INTEGER PRIMARY KEY AUTOINCREMENT, metadata_id INTEGER, start_ts REAL, state REAL, mean REAL, min REAL, max REAL, sum REAL)"
+            )
+            conn.executemany(
+                "INSERT INTO statistics_meta(id, statistic_id) VALUES(?,?)",
+                [(1, "sensor.old"), (2, "sensor.new")],
+            )
+            # Only new has rows.
+            conn.executemany(
+                "INSERT INTO statistics(metadata_id, start_ts, state, mean, min, max, sum) VALUES(?,?,?,?,?,?,?)",
+                [
+                    (2, 0.0, None, 5.0, 4.0, 6.0, None),
+                ],
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        orig_input = self._mock_input(["n"])
+        buf = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(buf):
+                run_merge(old_entity_id="sensor.old", new_entity_id="sensor.new", db_path=db, storage_dir=storage)
+        finally:
+            builtins.input = orig_input
+
+        out = buf.getvalue()
+        self.assertIn("Aborted.", out)
+        self.assertIn("STATISTICS:", out)
+        self.assertIn("- no statistics to copy", out)
 
     def test_overlap_accept_skip_proceeds_and_skips_overlapping_old_rows(self) -> None:
         run_merge = _load_merge_module().run_merge
