@@ -18,6 +18,14 @@ class MergeHistoryError(RuntimeError):
     pass
 
 
+def _sqlite_ro_uri(db_path: Path) -> str:
+    # Use a standards-compliant file URI so SQLite parses it correctly on all OSes.
+    # Examples:
+    #   POSIX:   file:///homeassistant/home-assistant_v2.db?mode=ro
+    #   Windows: file:///E:/dev/ha-merge-history/home-assistant_v2.db?mode=ro
+    return db_path.resolve().as_uri() + "?mode=ro"
+
+
 def _sql_literal(v: Any) -> str:
     if v is None:
         return "NULL"
@@ -522,8 +530,7 @@ def run_merge_many(
 
     if dry_run:
         # SQLite-level read-only: prevents writes and avoids WAL/journal creation.
-        posix_path = db_path.resolve().as_posix()
-        conn = sqlite3.connect(f"file:/{posix_path}?mode=ro", uri=True)
+        conn = sqlite3.connect(_sqlite_ro_uri(db_path), uri=True)
     else:
         conn = sqlite3.connect(str(db_path))
     try:

@@ -579,6 +579,22 @@ class TestMergeHistoryScript(unittest.TestCase):
         finally:
             ro.close()
 
+    def test_sqlite_ro_uri_is_valid_file_uri(self) -> None:
+        merge_module = _load_merge_module()
+        sqlite_ro_uri = merge_module._sqlite_ro_uri
+
+        # POSIX-style absolute path.
+        uri = sqlite_ro_uri(Path("/homeassistant/home-assistant_v2.db"))
+        self.assertTrue(uri.startswith("file:///"))
+        self.assertIn("/homeassistant/home-assistant_v2.db", uri)
+        self.assertTrue(uri.endswith("?mode=ro"))
+
+        # Windows-like drive path.
+        uri2 = sqlite_ro_uri(Path("E:/dev/ha-merge-history/home-assistant_v2.db"))
+        self.assertTrue(uri2.startswith("file:///"))
+        self.assertIn("/E:/dev/ha-merge-history/home-assistant_v2.db", uri2)
+        self.assertTrue(uri2.endswith("?mode=ro"))
+
 
 if __name__ == "__main__":
     unittest.main()
