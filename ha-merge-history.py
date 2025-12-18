@@ -582,8 +582,11 @@ def run_merge_many(
                     )
                     if omit_count:
                         _pline(f"  [{_fmt_ts(overlap_start)} - {_fmt_ts(overlap_end)}] ommit {omit_count} rows:")
-                        for r in omit_rows:
+                        shown = omit_rows[:10]
+                        for r in shown:
                             _pline("    " + json.dumps(r, ensure_ascii=False, sort_keys=True, default=str))
+                        if omit_count > 10:
+                            _pline(f"    WARNING: omitted rows truncated; showing first 10 of {omit_count}")
 
             _pline()
 
