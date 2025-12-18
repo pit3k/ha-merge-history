@@ -716,7 +716,8 @@ def run_merge_many(
                     for old_obj, new_obj in shown:
                         old_json = json.dumps(old_obj, ensure_ascii=False, sort_keys=True, default=str)
                         new_json = json.dumps(new_obj, ensure_ascii=False, sort_keys=True, default=str)
-                        _pline(f"    {old_json} != {new_json}")
+                        _pline(f"    old: {old_json}")
+                        _pline(f"    new: {new_json}")
                     if len(conflicts) > 10:
                         _pline(
                             f"    WARNING: conflicting rows truncated; showing first 10 of {len(conflicts)}"
