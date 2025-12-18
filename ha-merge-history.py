@@ -518,9 +518,16 @@ def run_merge_many(
 
     entities = _load_entity_registry(storage_dir)
 
-    conn = sqlite3.connect(str(db_path))
+    if dry_run:
+        # SQLite-level read-only: prevents writes and avoids WAL/journal creation.
+        posix_path = db_path.resolve().as_posix()
+        conn = sqlite3.connect(f"file:/{posix_path}?mode=ro", uri=True)
+    else:
+        conn = sqlite3.connect(str(db_path))
     try:
         conn.row_factory = sqlite3.Row
+        if dry_run:
+            conn.execute("PRAGMA query_only = ON")
 
         pair_plans: list[PairPlan] = []
 
