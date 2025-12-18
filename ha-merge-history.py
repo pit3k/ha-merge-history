@@ -267,6 +267,65 @@ def _overlap_rows_identical_old_new(
     return old_rows == new_rows
 
 
+def _overlap_conflicting_rows_old_new(
+    conn: sqlite3.Connection,
+    table: str,
+    selector: StatsSelector,
+    *,
+    overlap_start_ts: float,
+    overlap_end_ts: float,
+) -> list[tuple[Any, Any]]:
+    cols = _columns(conn, table)
+    start_epoch_expr = _start_ts_expr(cols)
+
+    ignore = {"id", "created_ts", selector.id_col}
+    compare_cols = [c for c in sorted(cols) if c not in ignore]
+    if "start_ts" in compare_cols:
+        compare_cols.remove("start_ts")
+    compare_cols.insert(0, "start_ts")
+
+    select_exprs: list[str] = []
+    for c in compare_cols:
+        if c == "start_ts":
+            select_exprs.append(f"{start_epoch_expr} AS start_ts")
+        else:
+            select_exprs.append(c)
+    select_sql = ", ".join(select_exprs)
+
+    def _fetch(params: tuple[Any, ...]) -> dict[float, list[dict[str, Any]]]:
+        rows = conn.execute(
+            f"SELECT {select_sql} FROM {table} "
+            f"WHERE metadata_id = ? AND {start_epoch_expr} >= ? AND {start_epoch_expr} <= ? "
+            f"ORDER BY {start_epoch_expr} ASC",
+            params,
+        ).fetchall()
+        out: dict[float, list[dict[str, Any]]] = {}
+        for r in rows:
+            start_ts = float(r[0])
+            rep: dict[str, Any] = {}
+            for idx, name in enumerate(compare_cols):
+                if name == "start_ts":
+                    rep[name] = start_ts
+                else:
+                    rep[name] = r[idx]
+            out.setdefault(start_ts, []).append(rep)
+        return out
+
+    old_map = _fetch((selector.old_id_value, overlap_start_ts, overlap_end_ts))
+    new_map = _fetch((selector.new_id_value, overlap_start_ts, overlap_end_ts))
+
+    conflicts: list[tuple[Any, Any]] = []
+    for ts in sorted(set(old_map.keys()) | set(new_map.keys())):
+        old_items = old_map.get(ts)
+        new_items = new_map.get(ts)
+        old_obj: Any = None if not old_items else (old_items[0] if len(old_items) == 1 else old_items)
+        new_obj: Any = None if not new_items else (new_items[0] if len(new_items) == 1 else new_items)
+        if json.dumps(old_obj, sort_keys=True, default=str) != json.dumps(new_obj, sort_keys=True, default=str):
+            conflicts.append((old_obj, new_obj))
+
+    return conflicts
+
+
 def _latest_sum(conn: sqlite3.Connection, table: str, selector: StatsSelector) -> float:
     cols = _columns(conn, table)
     if "sum" not in cols:
@@ -643,12 +702,25 @@ def run_merge_many(
                         continue
 
                     _pline("  - will not copy statistic, conflictig data")
-                    _pline(f"  [{_fmt_ts(overlap_start)} - {_fmt_ts(overlap_end)}] ommit {omit_count} rows:")
-                    shown = omit_rows[:10]
-                    for r in shown:
-                        _pline("    " + json.dumps(r, ensure_ascii=False, sort_keys=True, default=str))
-                    if omit_count > 10:
-                        _pline(f"    WARNING: omitted rows truncated; showing first 10 of {omit_count}")
+                    conflicts = _overlap_conflicting_rows_old_new(
+                        conn,
+                        p.table,
+                        sel,
+                        overlap_start_ts=overlap_start,
+                        overlap_end_ts=overlap_end,
+                    )
+                    _pline(
+                        f"  [{_fmt_ts(overlap_start)} - {_fmt_ts(overlap_end)}] conflicting {len(conflicts)} rows:"
+                    )
+                    shown = conflicts[:10]
+                    for old_obj, new_obj in shown:
+                        old_json = json.dumps(old_obj, ensure_ascii=False, sort_keys=True, default=str)
+                        new_json = json.dumps(new_obj, ensure_ascii=False, sort_keys=True, default=str)
+                        _pline(f"    {old_json} != {new_json}")
+                    if len(conflicts) > 10:
+                        _pline(
+                            f"    WARNING: conflicting rows truncated; showing first 10 of {len(conflicts)}"
+                        )
                     continue
 
                 _pline(f"  [{_fmt_ts(p.old_start)} - {_fmt_ts(p.old_end)}] copy {p.old_count} rows")

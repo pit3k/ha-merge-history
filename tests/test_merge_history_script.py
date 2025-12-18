@@ -283,7 +283,8 @@ class TestMergeHistoryScript(unittest.TestCase):
         self.assertIn("Aborted.", out)
         self.assertIn("STATISTICS:", out)
         self.assertIn("- will not copy statistic, conflictig data", out)
-        self.assertIn("ommit 2 rows:", out)
+        self.assertIn("conflicting 2 rows:", out)
+        self.assertIn(" != ", out)
         self.assertNotIn("update", out)
 
         ro = sqlite3.connect(str(db))
