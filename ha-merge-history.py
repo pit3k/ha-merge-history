@@ -396,21 +396,21 @@ def _apply_pair_plans(conn: sqlite3.Connection, pair_plans: list[PairPlan], *, d
 
         # Update sums first (existing new rows)
         if plan.state_class in {"total", "total_increasing"} and plan.offset != 0.0:
-            for table in ("statistics", "statistics_short_term"):
-                if not _table_exists(conn, table):
+            for tp in plan.table_plans:
+                if not _table_exists(conn, tp.table):
                     continue
-                sel = _resolve_stats_selector(conn, table, old_entity_id, new_entity_id)
-                _update_sums(conn, table, sel, plan.offset, dry_run=dry_run)
+                sel = _resolve_stats_selector(conn, tp.table, old_entity_id, new_entity_id)
+                _update_sums(conn, tp.table, sel, plan.offset, dry_run=dry_run)
 
         # Copy old rows into new, possibly skipping overlap
-        for table in ("statistics", "statistics_short_term"):
-            if not _table_exists(conn, table):
+        for tp in plan.table_plans:
+            if not _table_exists(conn, tp.table):
                 continue
-            sel = _resolve_stats_selector(conn, table, old_entity_id, new_entity_id)
-            extra_where_sql, extra_params = plan.copy_filters.get(table, ("", ()))
+            sel = _resolve_stats_selector(conn, tp.table, old_entity_id, new_entity_id)
+            extra_where_sql, extra_params = plan.copy_filters.get(tp.table, ("", ()))
             copied_total += _copy_rows(
                 conn,
-                table,
+                tp.table,
                 sel,
                 extra_where_sql=extra_where_sql,
                 extra_params=extra_params,
@@ -484,6 +484,8 @@ def _plan_pair(
         eff_old_where = info.selector.where_old + (" " + extra_where_sql if extra_where_sql else "")
         eff_old_params = (*info.selector.params_old, *extra_params)
         eff_old_count, eff_old_start, eff_old_end = _stats_span(conn, info.table, eff_old_where, eff_old_params)
+        if eff_old_count == 0:
+            continue
         plans.append(
             TablePlan(
                 info.table,
@@ -495,6 +497,10 @@ def _plan_pair(
                 info.new_end,
             )
         )
+
+    planned_tables = {p.table for p in plans}
+    copy_filters = {k: v for k, v in copy_filters.items() if k in planned_tables}
+    overlaps = {k: v for k, v in overlaps.items() if k in planned_tables}
 
     offset = 0.0
     if old_sc in {"total", "total_increasing"}:

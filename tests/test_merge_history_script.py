@@ -239,6 +239,61 @@ class TestMergeHistoryScript(unittest.TestCase):
         self.assertIn("WARNING: omitted rows truncated; showing first 10 of 11", out)
         self.assertEqual(out.count('"id":'), 10)
 
+    def test_when_ommit_leaves_zero_rows_skip_table_details(self) -> None:
+        merge_module = _load_merge_module()
+        run_merge = merge_module.run_merge
+
+        db = self._make_db()
+        storage = self._make_storage(old_id="sensor.old", new_id="sensor.new", state_class="total_increasing")
+
+        conn = sqlite3.connect(str(db))
+        try:
+            conn.execute("CREATE TABLE statistics_meta (id INTEGER, statistic_id TEXT)")
+            conn.execute(
+                "CREATE TABLE statistics (id INTEGER PRIMARY KEY AUTOINCREMENT, metadata_id INTEGER, start_ts REAL, state REAL, sum REAL)"
+            )
+            conn.executemany(
+                "INSERT INTO statistics_meta(id, statistic_id) VALUES(?,?)",
+                [(1, "sensor.old"), (2, "sensor.new")],
+            )
+            # Old rows are all overlapping (>= new_start), so after filtering (< new_start) there are 0 rows to copy.
+            conn.executemany(
+                "INSERT INTO statistics(metadata_id, start_ts, state, sum) VALUES(?,?,?,?)",
+                [
+                    (1, 7200.0, 2.0, 12.0),
+                    (1, 10800.0, 3.0, 13.0),
+                    (2, 7200.0, 3.0, 1.0),
+                    (2, 10800.0, 4.0, 2.0),
+                ],
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        # Decline final confirmation => abort (no exception)
+        orig_input = self._mock_input(["n"])
+        buf = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(buf):
+                run_merge(old_entity_id="sensor.old", new_entity_id="sensor.new", db_path=db, storage_dir=storage)
+        finally:
+            builtins.input = orig_input
+
+        out = buf.getvalue()
+        self.assertIn("Aborted.", out)
+        self.assertNotIn("STATISTICS:", out)
+        self.assertNotIn("ommit", out)
+        self.assertNotIn("update", out)
+
+        ro = sqlite3.connect(str(db))
+        try:
+            rows = ro.execute(
+                "SELECT metadata_id, start_ts FROM statistics ORDER BY metadata_id, start_ts"
+            ).fetchall()
+            self.assertEqual(rows, [(1, 7200.0), (1, 10800.0), (2, 7200.0), (2, 10800.0)])
+        finally:
+            ro.close()
+
     def test_overlap_accept_skip_proceeds_and_skips_overlapping_old_rows(self) -> None:
         run_merge = _load_merge_module().run_merge
 
