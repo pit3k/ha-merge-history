@@ -420,15 +420,17 @@ def _plan_pair(
 ) -> PairPlan:
     old_ent = entities.get(old_entity_id)
     new_ent = entities.get(new_entity_id)
-    if old_ent is None:
-        raise MergeHistoryError(f"Old entity not found in registry: {old_entity_id}")
     if new_ent is None:
         raise MergeHistoryError(f"New entity not found in registry: {new_entity_id}")
 
-    old_sc = _get_state_class(old_ent)
     new_sc = _get_state_class(new_ent)
-    if old_sc != new_sc:
-        raise MergeHistoryError(f"State class mismatch: old={old_sc!r} new={new_sc!r}")
+    if old_ent is None:
+        old_sc = new_sc
+    else:
+        old_sc = _get_state_class(old_ent)
+        if old_sc != new_sc:
+            raise MergeHistoryError(f"State class mismatch: old={old_sc!r} new={new_sc!r}")
+
     if old_sc not in {"measurement", "total", "total_increasing"}:
         raise MergeHistoryError(f"Unsupported state class: {old_sc!r}")
 

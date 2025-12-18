@@ -54,6 +54,20 @@ class TestMergeHistoryScript(unittest.TestCase):
         (storage / "core.entity_registry").write_text(json.dumps(doc), encoding="utf-8")
         return storage
 
+    def _make_storage_new_only(self, *, new_id: str, state_class: str) -> Path:
+        d = Path(tempfile.mkdtemp())
+        storage = d / ".storage"
+        storage.mkdir(parents=True, exist_ok=True)
+        doc = {
+            "data": {
+                "entities": [
+                    {"entity_id": new_id, "capabilities": {"state_class": state_class}},
+                ]
+            }
+        }
+        (storage / "core.entity_registry").write_text(json.dumps(doc), encoding="utf-8")
+        return storage
+
     def test_legacy_schema_is_rejected(self) -> None:
         merge_module = _load_merge_module()
         run_merge = merge_module.run_merge
@@ -413,6 +427,52 @@ class TestMergeHistoryScript(unittest.TestCase):
             conn.close()
 
         import builtins
+
+        orig_input = builtins.input
+        builtins.input = lambda *_args, **_kwargs: "y"
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                run_merge(old_entity_id="sensor.old", new_entity_id="sensor.new", db_path=db, storage_dir=storage)
+        finally:
+            builtins.input = orig_input
+
+        ro = sqlite3.connect(str(db))
+        try:
+            rows = ro.execute(
+                "SELECT start_ts, mean FROM statistics WHERE metadata_id=2 ORDER BY start_ts"
+            ).fetchall()
+            self.assertEqual([r[0] for r in rows], [0.0, 3600.0, 7200.0])
+            self.assertEqual([float(r[1]) for r in rows], [5.0, 7.0, 9.0])
+        finally:
+            ro.close()
+
+    def test_missing_old_entity_in_registry_uses_new_state_class(self) -> None:
+        run_merge = _load_merge_module().run_merge
+
+        db = self._make_db()
+        storage = self._make_storage_new_only(new_id="sensor.new", state_class="measurement")
+
+        conn = sqlite3.connect(str(db))
+        try:
+            conn.execute("CREATE TABLE statistics_meta (id INTEGER, statistic_id TEXT)")
+            conn.execute(
+                "CREATE TABLE statistics (id INTEGER PRIMARY KEY AUTOINCREMENT, metadata_id INTEGER, start_ts REAL, state REAL, mean REAL, min REAL, max REAL, sum REAL)"
+            )
+            conn.executemany(
+                "INSERT INTO statistics_meta(id, statistic_id) VALUES(?,?)",
+                [(1, "sensor.old"), (2, "sensor.new")],
+            )
+            conn.executemany(
+                "INSERT INTO statistics(metadata_id, start_ts, state, mean, min, max, sum) VALUES(?,?,?,?,?,?,?)",
+                [
+                    (1, 0.0, None, 5.0, 4.0, 6.0, None),
+                    (1, 3600.0, None, 7.0, 6.0, 8.0, None),
+                    (2, 7200.0, None, 9.0, 8.0, 10.0, None),
+                ],
+            )
+            conn.commit()
+        finally:
+            conn.close()
 
         orig_input = builtins.input
         builtins.input = lambda *_args, **_kwargs: "y"
